@@ -1,0 +1,134 @@
+name: Security Scan
+
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        required: true
+        type: string
+
+jobs:
+  security:
+    name: 🔐 Security Scan (tfsec + Checkov + TFLint)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ==========================================================
+      # 🔍 INSTALL TOOLS
+      # ==========================================================
+
+      - name: Install tfsec
+        run: |
+          curl -s https://raw.githubusercontent.com/aquasecurity/tfsec/master/scripts/install_linux.sh | bash
+
+      - name: Install Checkov + jq
+        run: |
+          pip install checkov
+          sudo apt-get update && sudo apt-get install -y jq
+
+      # ==========================================================
+      # FULL REPORT (ALL SEVERITIES - NO FAIL)
+      # ==========================================================
+
+      - name: TFSEC JSON REPORT
+        run: |
+          tfsec ${{ inputs.working-directory }} --format json > tfsec.json || true
+
+      - name: CHECKOV JSON REPORT
+        run: |
+          checkov -d ${{ inputs.working-directory }} \
+            --framework terraform \
+            -o json > checkov.json || true
+
+      # ==========================================================
+      # EXTRACT COUNTS (FROM CHECKOV)
+      # ==========================================================
+
+      - name: Extract Severity Counts
+        id: counts
+        run: |
+          LOW=$(jq '[.results.failed_checks[] | select(.severity=="LOW")] | length' checkov.json)
+          MEDIUM=$(jq '[.results.failed_checks[] | select(.severity=="MEDIUM")] | length' checkov.json)
+          HIGH=$(jq '[.results.failed_checks[] | select(.severity=="HIGH")] | length' checkov.json)
+          CRITICAL=$(jq '[.results.failed_checks[] | select(.severity=="CRITICAL")] | length' checkov.json)
+
+          echo "low=$LOW" >> $GITHUB_OUTPUT
+          echo "medium=$MEDIUM" >> $GITHUB_OUTPUT
+          echo "high=$HIGH" >> $GITHUB_OUTPUT
+          echo "critical=$CRITICAL" >> $GITHUB_OUTPUT
+
+      # ==========================================================
+      # ENFORCEMENT (FAIL ONLY HIGH/CRITICAL)
+      # ==========================================================
+
+      - name: TFSEC ENFORCEMENT
+        run: |
+          tfsec ${{ inputs.working-directory }} \
+            --minimum-severity HIGH
+
+      - name: CHECKOV ENFORCEMENT
+        run: |
+          checkov -d ${{ inputs.working-directory }} \
+            --framework terraform \
+            --quiet \
+            --check HIGH,CRITICAL
+
+      # ==========================================================
+      # TFLINT
+      # ==========================================================
+
+      - name: Setup TFLint
+        uses: terraform-linters/setup-tflint@v4
+
+      - name: Init TFLint
+        run: tflint --init
+
+      - name: TFLINT REPORT
+        run: tflint -f compact || true
+
+      # ==========================================================
+      # FINAL SUMMARY (LOGS)
+      # ==========================================================
+
+      - name: Final Security Summary (Logs)
+        if: always()
+        run: |
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "FINAL SECURITY SUMMARY"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "LOW: ${{ steps.counts.outputs.low }} (Allowed)"
+          echo "MEDIUM: ${{ steps.counts.outputs.medium }} (Allowed)"
+          echo "HIGH: ${{ steps.counts.outputs.high }} (Blocked)"
+          echo "CRITICAL: ${{ steps.counts.outputs.critical }} (Blocked)"
+          echo ""
+
+          if [ "${{ steps.counts.outputs.high }}" -eq 0 ] && [ "${{ steps.counts.outputs.critical }}" -eq 0 ]; then
+            echo "STATUS: PASSED "
+          else
+            echo "STATUS: FAILED "
+          fi
+
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+      # ==========================================================
+      #  GITHUB UI SUMMARY (DYNAMIC)
+      # ==========================================================
+
+      - name: Publish Dynamic Summary
+        if: always()
+        run: |
+          echo "## 🔐 Security Scan Summary" >> $GITHUB_STEP_SUMMARY
+          echo "- LOW: ${{ steps.counts.outputs.low }} (Allowed )" >> $GITHUB_STEP_SUMMARY
+          echo "- MEDIUM: ${{ steps.counts.outputs.medium }} (Allowed )" >> $GITHUB_STEP_SUMMARY
+          echo "- HIGH: ${{ steps.counts.outputs.high }} (Blocked )" >> $GITHUB_STEP_SUMMARY
+          echo "- CRITICAL: ${{ steps.counts.outputs.critical }} (Blocked )" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [ "${{ steps.counts.outputs.high }}" -eq 0 ] && [ "${{ steps.counts.outputs.critical }}" -eq 0 ]; then
+            echo "###  STATUS: PASSED" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "###  STATUS: FAILED" >> $GITHUB_STEP_SUMMARY
+          fi
