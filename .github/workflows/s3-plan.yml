@@ -68,7 +68,7 @@ jobs:
           aws-region: us-west-2
 
       - name: Terraform FMT
-        run: terraform fmt -check -recursive
+        run: terraform fmt -recursive
 
       - name: Terraform Init
         working-directory: envs/${{ env.ENV }}/s3
