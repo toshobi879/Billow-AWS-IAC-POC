@@ -1,4 +1,4 @@
-bucket_name = "billow-app-dev-bucket-001"
+bucket_name = "billow-app-dev-bucket-01"
 environment = "dev"
 
 versioning_enabled = true
