@@ -1,0 +1,205 @@
+name: S3 • Deploy • Automated/Manual
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Select Environment"
+        required: true
+        type: choice
+        options: [dev, uat, prod]
+
+  push:
+    branches:
+      - develop
+    paths:
+      - 'modules/s3/**'
+      - 'envs/**/s3/**'
+
+permissions:
+  id-token: write
+  contents: read
+
+
+# STEP 1: DETECT ENVIRONMENT
+
+jobs:
+  env-detect:
+    name: Detect Environment
+    runs-on: ubuntu-latest
+
+    outputs:
+      env: ${{ steps.setenv.outputs.env }}
+
+    steps:
+      - name: Detect Environment
+        id: setenv
+        run: |
+          if [[ "${{ github.event_name }}" == "push" ]]; then
+            echo "env=dev" >> $GITHUB_OUTPUT
+          else
+            echo "env=${{ github.event.inputs.environment }}" >> $GITHUB_OUTPUT
+          fi
+
+
+
+#  STEP 2: VALIDATE
+
+  validate:
+    name: Validate
+    runs-on: ubuntu-latest
+    needs: env-detect
+
+    environment: ${{ needs.env-detect.outputs.env == 'dev' && 'dev-plan' || format('{0}-plan', needs.env-detect.outputs.env) }}
+
+    env:
+      ENV: ${{ needs.env-detect.outputs.env }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Detect Branch
+        run: echo "BRANCH=${GITHUB_REF#refs/heads/}" >> $GITHUB_ENV
+
+      - name: Validate Branch vs Environment
+        run: |
+          echo "Branch: $BRANCH"
+          echo "Environment: $ENV"
+
+          if [[ "$ENV" == "dev" && "$BRANCH" != "develop" ]]; then
+            echo "DEV allowed only from develop"; exit 1
+          fi
+
+          if [[ "$ENV" == "uat" && ! "$BRANCH" =~ ^release/ ]]; then
+            echo "UAT allowed only from release/*"; exit 1
+          fi
+
+          if [[ "$ENV" == "prod" && "$BRANCH" != "main" ]]; then
+            echo "PROD allowed only from main"; exit 1
+          fi
+
+          echo "Branch validation passed"
+
+      - uses: hashicorp/setup-terraform@v3
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: us-west-2
+
+      - name: Terraform FMT
+        run: terraform fmt -recursive
+
+      - name: Terraform Init
+        working-directory: envs/${{ env.ENV }}/s3
+        run: terraform init -reconfigure
+
+      - name: Terraform Validate
+        working-directory: envs/${{ env.ENV }}/s3
+        run: terraform validate
+
+
+
+# STEP 3: PLAN
+
+  plan:
+    name: Plan
+    runs-on: ubuntu-latest
+    needs: [env-detect, validate]
+
+    environment: ${{ needs.env-detect.outputs.env == 'dev' && 'dev-plan' || format('{0}-plan', needs.env-detect.outputs.env) }}
+
+    env:
+      ENV: ${{ needs.env-detect.outputs.env }}
+
+    defaults:
+      run:
+        working-directory: envs/${{ env.ENV }}/s3
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: us-west-2
+
+      - name: Terraform Init
+        run: terraform init -reconfigure
+
+      - name: Terraform Plan
+        run: terraform plan -out=tfplan -var-file="terraform.tfvars"
+
+      - name: Upload Plan
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan
+          path: envs/${{ env.ENV }}/s3/tfplan
+
+
+
+# APPROVAL (ONLY FOR UAT & PROD)
+
+  approval:
+    name: Approval Stage
+    runs-on: ubuntu-latest
+
+    needs: [env-detect, plan]
+
+    # Skip for DEV
+    if: ${{ needs.env-detect.outputs.env != 'dev' }}
+
+    # ONLY place where approval happens
+    environment:
+      name: ${{ needs.env-detect.outputs.env }}
+
+    steps:
+      - name: Approval Placeholder
+        run: echo "Waiting for manual approval..."
+
+#  STEP 5: DEPLOY (WITH BUILT-IN APPROVAL)
+
+  deploy:
+    name: Deploy
+    runs-on: ubuntu-latest
+
+    needs: [env-detect, plan]
+
+    #  Always run for dev, uat, prod
+    # Approval will be auto-handled by environment
+    environment:
+      name: ${{ needs.env-detect.outputs.env }}
+
+    env:
+      ENV: ${{ needs.env-detect.outputs.env }}
+
+    defaults:
+      run:
+        working-directory: envs/${{ env.ENV }}/s3
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+
+      - name: Configure AWS Credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: us-west-2
+
+      - name: Download Plan
+        uses: actions/download-artifact@v4
+        with:
+          name: tfplan
+          path: envs/${{ env.ENV }}/s3
+
+      - name: Terraform Init
+        run: terraform init -reconfigure
+
+      - name: Terraform Apply
+        run: terraform apply -auto-approve tfplan
