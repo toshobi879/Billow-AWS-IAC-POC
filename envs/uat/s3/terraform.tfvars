@@ -1,4 +1,4 @@
-bucket_name = "billow-app-uat-bucket-001"
+bucket_name = "billow-app-uat-bucket-01"
 environment = "uat"
 
 versioning_enabled = true
